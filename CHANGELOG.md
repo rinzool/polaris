@@ -113,6 +113,14 @@ request adding CHANGELOG notes for breaking (!) changes and possibly other secti
   loading the grants held by a principal, principal role or catalog role scans every grant record
   in the realm, because the `grant_records` primary key continues with the securable columns after
   `realm_id`. Existing CockroachDB deployments need a manual index creation — see Upgrade notes.
+- File cleanup tasks now issue batched object-storage deletes again. `CatalogUtil.deleteFiles`
+  batches only when the `FileIO` is an `instanceof SupportsBulkOperations`, but the `FileIO` reaching
+  the cleanup tasks is wrapped by `ExceptionMappingFileIO` and, on Azure, by
+  `WasbTranslatingFileIO`. Neither wrapper declared the capability held by the wrapped `FileIO`, so
+  the check always failed and every file was deleted individually. Both wrappers now propagate
+  `SupportsBulkOperations` when the wrapped `FileIO` supports it, which affects every storage
+  backend, since `S3FileIO`, `GCSFileIO`, `ADLSFileIO` and `HadoopFileIO` all implement
+  `DelegateFileIO`.
 
 ### Commits
 
