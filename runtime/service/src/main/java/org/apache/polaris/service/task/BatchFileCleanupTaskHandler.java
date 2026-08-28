@@ -25,6 +25,7 @@ import java.util.concurrent.ExecutorService;
 import java.util.stream.Collectors;
 import org.apache.iceberg.catalog.TableIdentifier;
 import org.apache.iceberg.io.FileIO;
+import org.apache.iceberg.io.SupportsBulkOperations;
 import org.apache.polaris.core.StructuredLogKeys;
 import org.apache.polaris.core.context.CallContext;
 import org.apache.polaris.core.entity.AsyncTaskType;
@@ -57,33 +58,23 @@ public class BatchFileCleanupTaskHandler extends FileCleanupTaskHandler {
     TableIdentifier tableId = cleanupTask.tableId();
     List<String> batchFiles = cleanupTask.batchFiles();
     try (FileIO authorizedFileIO = fileIOSupplier.apply(task, tableId)) {
-      Map<Boolean, List<String>> partitionedFiles =
-          batchFiles.stream()
-              .collect(Collectors.partitioningBy(file -> TaskUtils.exists(file, authorizedFileIO)));
-      List<String> validFiles = partitionedFiles.get(true);
-      List<String> missingFiles = partitionedFiles.get(false);
-      if (validFiles.isEmpty()) {
-        LOGGER
-            .atWarn()
-            .addKeyValue(StructuredLogKeys.BATCH_FILES, batchFiles.toString())
-            .addKeyValue(StructuredLogKeys.TABLE_ID, tableId)
-            .log("File batch cleanup task scheduled, but none of the files in batch exists");
+      List<String> filesToDelete =
+          authorizedFileIO instanceof SupportsBulkOperations
+              ? batchFiles
+              : existingFiles(batchFiles, authorizedFileIO, tableId);
+      if (filesToDelete.isEmpty()) {
         return;
-      }
-      if (!missingFiles.isEmpty()) {
-        LOGGER
-            .atWarn()
-            .addKeyValue(StructuredLogKeys.BATCH_FILES, batchFiles.toString())
-            .addKeyValue(StructuredLogKeys.MISSING_FILES, missingFiles.toString())
-            .addKeyValue(StructuredLogKeys.TABLE_ID, tableId)
-            .log(
-                "File batch cleanup task scheduled, but {} files in the batch are missing",
-                missingFiles.size());
       }
 
       CompletableFuture<Void> deleteFutures =
           tryDelete(
-              tableId, authorizedFileIO, validFiles, cleanupTask.type().getValue(), true, null, 1);
+              tableId,
+              authorizedFileIO,
+              filesToDelete,
+              cleanupTask.type().getValue(),
+              true,
+              null,
+              1);
 
       try {
         deleteFutures.join();
@@ -111,6 +102,39 @@ public class BatchFileCleanupTaskHandler extends FileCleanupTaskHandler {
     public String toString() {
       return value;
     }
+  }
+
+  /**
+   * Filter out the files that no longer exist, logging how many were missing.
+   *
+   * <p>Only used when the FileIO deletes one file at a time. A bulk delete already tolerates paths
+   * that are gone, so probing each one first would add an object storage request per file for no
+   * benefit.
+   */
+  private List<String> existingFiles(
+      List<String> batchFiles, FileIO fileIO, TableIdentifier tableId) {
+    Map<Boolean, List<String>> partitionedFiles =
+        batchFiles.stream()
+            .collect(Collectors.partitioningBy(file -> TaskUtils.exists(file, fileIO)));
+    List<String> existingFiles = partitionedFiles.get(true);
+    List<String> missingFiles = partitionedFiles.get(false);
+    if (existingFiles.isEmpty()) {
+      LOGGER
+          .atWarn()
+          .addKeyValue(StructuredLogKeys.BATCH_FILES, batchFiles.toString())
+          .addKeyValue(StructuredLogKeys.TABLE_ID, tableId)
+          .log("File batch cleanup task scheduled, but none of the files in batch exists");
+    } else if (!missingFiles.isEmpty()) {
+      LOGGER
+          .atWarn()
+          .addKeyValue(StructuredLogKeys.BATCH_FILES, batchFiles.toString())
+          .addKeyValue(StructuredLogKeys.MISSING_FILES, missingFiles.toString())
+          .addKeyValue(StructuredLogKeys.TABLE_ID, tableId)
+          .log(
+              "File batch cleanup task scheduled, but {} files in the batch are missing",
+              missingFiles.size());
+    }
+    return existingFiles;
   }
 
   public record BatchFileCleanupTask(

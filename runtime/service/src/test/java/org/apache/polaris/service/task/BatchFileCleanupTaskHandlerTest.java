@@ -46,6 +46,7 @@ import org.apache.iceberg.catalog.TableIdentifier;
 import org.apache.iceberg.inmemory.InMemoryFileIO;
 import org.apache.iceberg.io.FileIO;
 import org.apache.iceberg.io.InputFile;
+import org.apache.iceberg.io.SupportsBulkOperations;
 import org.apache.polaris.core.PolarisCallContext;
 import org.apache.polaris.core.context.CallContext;
 import org.apache.polaris.core.context.RealmContext;
@@ -56,6 +57,7 @@ import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.ValueSource;
+import org.mockito.ArgumentCaptor;
 import org.mockito.Mockito;
 
 @QuarkusTest
@@ -270,6 +272,39 @@ public class BatchFileCleanupTaskHandlerTest {
     Mockito.verify(fileIO, Mockito.times(1)).newInputFile(presentFile1);
     Mockito.verify(fileIO, Mockito.times(1)).newInputFile(presentFile2);
     Mockito.verify(fileIO, Mockito.times(1)).newInputFile(missingFile);
+  }
+
+  /** A FileIO that also supports bulk operations, as S3FileIO, GCSFileIO and ADLSFileIO all do. */
+  private interface BulkFileIO extends SupportsBulkOperations {}
+
+  @Test
+  public void testExistenceCheckIsSkippedWhenTheFileIoDeletesInBulk() {
+    String presentFile = "s3://bucket/present";
+    String missingFile = "s3://bucket/missing";
+
+    BulkFileIO fileIO = Mockito.mock(BulkFileIO.class);
+    BatchFileCleanupTaskHandler handler = newBatchFileCleanupTaskHandler(fileIO);
+    TableIdentifier tableIdentifier = TableIdentifier.of(Namespace.of("db1", "schema1"), "table1");
+    TaskEntity task =
+        new TaskEntity.Builder()
+            .withTaskType(AsyncTaskType.BATCH_FILE_CLEANUP)
+            .withData(
+                new BatchFileCleanupTaskHandler.BatchFileCleanupTask(
+                    tableIdentifier,
+                    List.of(presentFile, missingFile),
+                    BatchFileCleanupTaskHandler.BatchFileType.TABLE_METADATA))
+            .setName(UUID.randomUUID().toString())
+            .build();
+
+    assertThatCode(() -> handler.handleTask(task, polarisCallContext)).doesNotThrowAnyException();
+
+    // no HEAD per file: a bulk delete already tolerates paths that are gone
+    Mockito.verify(fileIO, Mockito.never()).newInputFile(Mockito.anyString());
+
+    @SuppressWarnings("unchecked")
+    ArgumentCaptor<Iterable<String>> captor = ArgumentCaptor.forClass(Iterable.class);
+    Mockito.verify(fileIO, Mockito.times(1)).deleteFiles(captor.capture());
+    assertThat(captor.getValue()).containsExactly(presentFile, missingFile);
   }
 
   @ParameterizedTest
